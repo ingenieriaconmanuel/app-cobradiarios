@@ -1,0 +1,58 @@
+name: CI / Despliegue
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Pruebas SQL (migraciones + RLS + negocio)
+        working-directory: supabase/tests/pglite
+        run: npm install && npm test
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Pruebas Flutter
+        working-directory: app
+        run: flutter pub get && flutter analyze && flutter test
+
+  # main -> staging ; tag v* -> producción
+  desplegar:
+    needs: pruebas
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'produccion' || 'staging' }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with: { version: latest }
+      - name: Migraciones y Edge Functions
+        run: |
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          supabase db push
+          supabase functions deploy invitar-usuario
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - name: Build web
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build web --release \
+            --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
+            --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+      - name: Publicar en Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy app/build/web --project-name=${{ vars.CLOUDFLARE_PROJECT }} --branch=${{ github.ref_name }}
