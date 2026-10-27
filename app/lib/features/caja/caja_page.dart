@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../../core/formato.dart';
 import '../../data/repositorio.dart';
 import '../../data/sesion.dart';
+import '../../offline/sincronizador.dart';
 
 final _cajaProvider = FutureProvider.autoDispose((ref) {
   final hoy = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -102,6 +103,21 @@ class CajaPage extends ConsumerWidget {
   }
 
   Future<void> _cerrar(BuildContext context, WidgetRef ref, String cajaId, num esperado) async {
+    // Con pagos sin enviar, el cierre quedaría descuadrado y esos pagos serían rechazados
+    if (offlineDisponible) {
+      await ref.read(sincronizadorProvider).sincronizar(descargar: false);
+      final porEnviar = await ref.read(baseLocalProvider).cantidadPorEnviar();
+      if (porEnviar > 0) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Hay $porEnviar pago(s) sin enviar. Busque señal y sincronice antes de cerrar la caja.'),
+          ));
+        }
+        return;
+      }
+      ref.invalidate(_cajaProvider);
+      if (!context.mounted) return;
+    }
     final v = await _pedirValor(context, 'Efectivo que entrega', inicial: esperado);
     if (v == null || !context.mounted) return;
     await _correr(context, ref, () => ref.read(repoProvider).cerrarCaja(cajaId, v));

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../data/sesion.dart';
+import '../../offline/sincronizador.dart';
 
 typedef _Destino = ({String ruta, IconData icono, String etiqueta, bool soloGestor});
 
@@ -34,7 +35,7 @@ class ShellPage extends ConsumerWidget {
         title: Text(perfil.empresa),
         actions: [
           Center(child: Text('${perfil.nombre} · ${perfil.rol.name}')),
-          IconButton(tooltip: 'Salir', icon: const Icon(Icons.logout), onPressed: () => ref.read(sesionProvider).salir()),
+          IconButton(tooltip: 'Salir', icon: const Icon(Icons.logout), onPressed: () => _salir(context, ref)),
         ],
       ),
       body: Row(
@@ -57,5 +58,30 @@ class ShellPage extends ConsumerWidget {
               destinations: [for (final d in destinos) NavigationDestination(icon: Icon(d.icono), label: d.etiqueta)],
             ),
     );
+  }
+
+  /// No dejar salir con pagos sin enviar; al salir se borran los datos locales.
+  Future<void> _salir(BuildContext context, WidgetRef ref) async {
+    if (offlineDisponible) {
+      final local = ref.read(baseLocalProvider);
+      await ref.read(sincronizadorProvider).sincronizar(descargar: false);
+      final porEnviar = await local.cantidadPorEnviar();
+      if (porEnviar > 0) {
+        if (context.mounted) {
+          await showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Pagos sin enviar'),
+              content: Text('Hay $porEnviar pago(s) guardados solo en este teléfono. '
+                  'Conéctese a internet y sincronice antes de cerrar sesión, o se perderán.'),
+              actions: [FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Entendido'))],
+            ),
+          );
+        }
+        return;
+      }
+      await local.borrarTodo();
+    }
+    await ref.read(sesionProvider).salir();
   }
 }

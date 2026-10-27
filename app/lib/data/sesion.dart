@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 enum Rol { admin, supervisor, cobrador }
@@ -24,7 +26,17 @@ class Perfil {
   final String empresa;
 
   bool get esGestor => rol != Rol.cobrador;
+
+  Map<String, dynamic> aMapa() => {
+        'id': id,
+        'tenant_id': tenantId,
+        'nombre': nombre,
+        'rol': rol.name,
+        'tenants': {'nombre': empresa},
+      };
 }
+
+const _clavePerfil = 'perfil_cache';
 
 enum EstadoSesion { cargando, sinSesion, sinEmpresa, lista }
 
@@ -47,18 +59,36 @@ class SesionController extends ChangeNotifier {
       perfil = null;
       estado = EstadoSesion.sinSesion;
     } else {
-      final fila = await _db
-          .from('perfiles')
-          .select('id, tenant_id, nombre, rol, tenants(nombre)')
-          .eq('id', usuario.id)
-          .maybeSingle();
-      perfil = fila == null ? null : Perfil.desdeMapa(fila);
-      estado = fila == null ? EstadoSesion.sinEmpresa : EstadoSesion.lista;
+      final prefs = await SharedPreferences.getInstance();
+      try {
+        final fila = await _db
+            .from('perfiles')
+            .select('id, tenant_id, nombre, rol, tenants(nombre)')
+            .eq('id', usuario.id)
+            .maybeSingle()
+            .timeout(const Duration(seconds: 10));
+        perfil = fila == null ? null : Perfil.desdeMapa(fila);
+        if (perfil != null) await prefs.setString(_clavePerfil, jsonEncode(perfil!.aMapa()));
+      } catch (_) {
+        // Sin señal: arrancar con el último perfil guardado de este mismo usuario
+        final guardado = prefs.getString(_clavePerfil);
+        final mapa = guardado == null ? null : jsonDecode(guardado) as Map<String, dynamic>;
+        perfil = mapa != null && mapa['id'] == usuario.id ? Perfil.desdeMapa(mapa) : null;
+        if (perfil == null) {
+          // Primer ingreso sin señal: seguir en "cargando" y reintentar
+          Future.delayed(const Duration(seconds: 5), recargar);
+          return;
+        }
+      }
+      estado = perfil == null ? EstadoSesion.sinEmpresa : EstadoSesion.lista;
     }
     notifyListeners();
   }
 
-  Future<void> salir() => _db.auth.signOut();
+  Future<void> salir() async {
+    (await SharedPreferences.getInstance()).remove(_clavePerfil);
+    await _db.auth.signOut();
+  }
 
   @override
   void dispose() {

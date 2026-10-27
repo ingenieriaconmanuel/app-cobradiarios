@@ -10,6 +10,7 @@ app-cobradiarios/
 │  └─ lib/
 │     ├─ core/                  env, router (redirección por sesión y rol), tema, formato COP
 │     ├─ data/                  sesion.dart (perfil/rol), repositorio.dart (lecturas + RPC)
+│     ├─ offline/               drift (base local) + sincronizador de pagos
 │     └─ features/              auth, shell, inicio, ruta, clientes, prestamos, caja, usuarios
 ├─ supabase/
 │  ├─ migrations/               01 multitenant · 02 cartera · 03 caja · 04 festivos/usura
@@ -70,14 +71,41 @@ Copiar `.env.example` a `.env` con la URL y anon key que muestra `supabase start
 cd app
 flutter create . --platforms=web,android --org co.cobradiarios   # solo la primera vez: genera android/ y web/
 flutter pub get
-flutter run -d chrome --dart-define-from-file=../.env
+dart run build_runner build --delete-conflicting-outputs   # genera lib/offline/base_local.g.dart (drift)
+flutter run -d chrome --dart-define-from-file=../.env      # web (en línea)
+flutter run -d android --dart-define-from-file=../.env     # cobrador con modo offline
 ```
+
+## Modo offline del cobrador (Android)
+
+```
+ Cobrador toca "Registrar pago"
+        │
+        ▼
+ drift (SQLite en el teléfono) ── cola pagos_pendientes (UUID v4 = p_id)
+        │                         + descuento inmediato en cobros_locales
+        ▼
+ Sincronizador: al abrir la app, al volver la señal, cada 2 min o con el botón
+        │
+        ├─ envía la cola en orden → registrar_pago (idempotente por p_id)
+        │     ├─ OK / duplicado          → enviado (se guarda 7 días como historial)
+        │     ├─ error de negocio (SQL)  → rechazado con el motivo, el cobrador lo ve
+        │     └─ sin red / token / 5xx   → se queda pendiente y se reintenta
+        └─ si la cola quedó vacía → descarga v_cobros_del_dia y reaplica lo pendiente
+```
+
+- `lib/offline/base_local.dart`: tablas locales `cobros_locales` y `pagos_pendientes`.
+- `lib/offline/sincronizador.dart`: envío, reintentos, descarga y `esRechazoDefinitivo()`.
+- El perfil queda guardado en el teléfono: la app abre sin señal si ya se había ingresado antes.
+- No se puede **cerrar caja** ni **cerrar sesión** con pagos sin enviar. Al cerrar sesión se borran los datos locales.
+- En web no hay modo offline: el cobrador trabaja directamente contra el servidor.
+- La pantalla de caja, los clientes y la creación de préstamos siguen requiriendo conexión.
 
 ### Pruebas
 
 ```bash
 cd supabase/tests/pglite && npm install && npm test   # SQL, sin Docker
-cd app && flutter test
+cd app && flutter test   # en Windows, las pruebas de drift necesitan sqlite3.dll en el PATH
 ```
 
 ## Despliegue
@@ -105,7 +133,8 @@ cd app && flutter test
 
 ## Próximas fases
 
-- [ ] Modo offline del cobrador (drift/SQLite + cola de pagos; el backend ya es idempotente)
+- [x] Modo offline del cobrador (drift/SQLite + cola de pagos)
+- [ ] Gastos y gestiones de cobro offline (requiere id generado en el teléfono en `registrar_gasto`)
 - [ ] GPS y foto en pagos y clientes, recibo por WhatsApp / impresora Bluetooth
 - [ ] Panel superadmin + suscripciones con Wompi (webhook)
 - [ ] Reportes: recaudo vs meta, mora por rangos 1–30/31–60/+60, utilidad, exportar Excel
